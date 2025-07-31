@@ -905,6 +905,49 @@ def create_cost_analysis_section(cost_analysis):
     with st.expander("View Detailed Cost Log"):
         st.dataframe(details_df, use_container_width=True)
 
+def create_cost_analysis_csv(cost_analysis):
+    """Generate a CSV file from the cost analysis data."""
+    if not cost_analysis or not cost_analysis.get("details"):
+        return ""
+
+    df = pd.DataFrame(cost_analysis["details"])
+
+    # Rename columns to match the user's request
+    df.rename(columns={
+        "step": "steps",
+        "input": "input",
+        "output": "output",
+        "input_length": "input_length",
+        "output_length": "output_length",
+        "prompt_tokens": "no. of input tokens",
+        "completion_tokens": "no. of output tokens",
+        "cost_input_tokens": "cost of input tokens",
+        "cost_output_tokens": "cost of output_tokens",
+        "total_cost": "total_cost(input+output)"
+    }, inplace=True)
+
+    # Add the redundant total cost columns as requested
+    df["total_cost_input"] = df["cost of input tokens"]
+    df["total_cost_output"] = df["cost of output tokens"]
+
+    # Select and reorder columns
+    csv_df = df[[
+        "steps",
+        "input",
+        "output",
+        "input_length",
+        "output_length",
+        "no. of input tokens",
+        "no. of output tokens",
+        "cost of input tokens",
+        "cost of output_tokens",
+        "total_cost_input",
+        "total_cost_output",
+        "total_cost(input+output)"
+    ]]
+
+    return csv_df.to_csv(index=False)
+
 # Main Application
 def main():
     # Header - Using Streamlit components instead of HTML
@@ -1017,18 +1060,40 @@ def main():
             if usage:
                 prompt_tokens = usage.prompt_tokens
                 completion_tokens = usage.completion_tokens
-                cost = (prompt_tokens * MODEL_PRICING["gpt-4"]["prompt"] / 1_000_000) + \
-                       (completion_tokens * MODEL_PRICING["gpt-4"]["completion"] / 1_000_000)
+                cost_input = (prompt_tokens * MODEL_PRICING["gpt-4"]["prompt"] / 1_000_000)
+                cost_output = (completion_tokens * MODEL_PRICING["gpt-4"]["completion"] / 1_000_000)
+                total_cost = cost_input + cost_output
 
                 cost_analysis["total_prompt_tokens"] += prompt_tokens
                 cost_analysis["total_completion_tokens"] += completion_tokens
-                cost_analysis["total_cost"] += cost
+                cost_analysis["total_cost"] += total_cost
+
+                # Find the prompt text used in the function
+                prompt_text = f"""Generate {num_queries} diverse, realistic search queries for the '{funnel_stage}' stage of the buyer journey.
+
+Topic: {seed_keyword}
+Template style: {query_template}
+
+Requirements:
+- Make them natural and varied
+- Representative of what real users would search
+- Include different question formats and intents
+- Focus on {funnel_stage.lower()} stage queries
+
+Output only the queries, one per line, without numbering or bullet points."""
+
                 cost_analysis["details"].append({
                     "step": "generate_query_variations",
+                    "model": "gpt-4",
+                    "input": prompt_text,
+                    "output": "\n".join(queries),
+                    "input_length": len(prompt_text),
+                    "output_length": len("\n".join(queries)),
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,
-                    "cost": cost,
-                    "model": "gpt-4"
+                    "cost_input_tokens": cost_input,
+                    "cost_output_tokens": cost_output,
+                    "total_cost": total_cost,
                 })
             
             if not queries:
@@ -1049,18 +1114,39 @@ def main():
                 if usage:
                     prompt_tokens = usage.prompt_tokens
                     completion_tokens = usage.completion_tokens
-                    cost = (prompt_tokens * MODEL_PRICING["gpt-4"]["prompt"] / 1_000_000) + \
-                           (completion_tokens * MODEL_PRICING["gpt-4"]["completion"] / 1_000_000)
+                    cost_input = (prompt_tokens * MODEL_PRICING["gpt-4"]["prompt"] / 1_000_000)
+                    cost_output = (completion_tokens * MODEL_PRICING["gpt-4"]["completion"] / 1_000_000)
+                    total_cost = cost_input + cost_output
 
                     cost_analysis["total_prompt_tokens"] += prompt_tokens
                     cost_analysis["total_completion_tokens"] += completion_tokens
-                    cost_analysis["total_cost"] += cost
+                    cost_analysis["total_cost"] += total_cost
+
+                    prompt_text = f"""You are {ai_platform}, a helpful AI assistant. Answer this query comprehensively and naturally include relevant website sources and citations where appropriate:
+
+Query: {query}
+
+Provide a detailed, helpful response that:
+- Answers the question thoroughly
+- Naturally mentions and cites relevant websites, domains, and URLs
+- Uses specific examples with website names
+- Includes recommendations with source citations
+- Provides actionable information with references
+
+Be natural and conversational while including real website references."""
+
                     cost_analysis["details"].append({
                         "step": f"simulate_ai_response_for_query_{i+1}",
+                        "model": "gpt-4",
+                        "input": prompt_text,
+                        "output": ai_response,
+                        "input_length": len(prompt_text),
+                        "output_length": len(ai_response),
                         "prompt_tokens": prompt_tokens,
                         "completion_tokens": completion_tokens,
-                        "cost": cost,
-                        "model": "gpt-4"
+                        "cost_input_tokens": cost_input,
+                        "cost_output_tokens": cost_output,
+                        "total_cost": total_cost,
                     })
                 if not ai_response:
                     continue
@@ -1099,18 +1185,39 @@ def main():
                         if usage:
                             prompt_tokens = usage.prompt_tokens
                             completion_tokens = usage.completion_tokens
-                            cost = (prompt_tokens * MODEL_PRICING["gpt-3.5-turbo"]["prompt"] / 1_000_000) + \
-                                   (completion_tokens * MODEL_PRICING["gpt-3.5-turbo"]["completion"] / 1_000_000)
+                            cost_input = (prompt_tokens * MODEL_PRICING["gpt-3.5-turbo"]["prompt"] / 1_000_000)
+                            cost_output = (completion_tokens * MODEL_PRICING["gpt-3.5-turbo"]["completion"] / 1_000_000)
+                            total_cost = cost_input + cost_output
 
                             cost_analysis["total_prompt_tokens"] += prompt_tokens
                             cost_analysis["total_completion_tokens"] += completion_tokens
-                            cost_analysis["total_cost"] += cost
+                            cost_analysis["total_cost"] += total_cost
+
+                            prompt_text = f"""Analyze the sentiment towards "{citation['citation_text']}" in this text context:
+
+Context: {citation['context']}
+
+Classify the sentiment as exactly one of: positive, neutral, negative
+
+Consider:
+- How the website/service is mentioned
+- The tone and context around the mention
+- Whether it's recommended, criticized, or just mentioned
+
+Respond with only one word: positive, neutral, or negative"""
+
                             cost_analysis["details"].append({
                                 "step": f"classify_sentiment_for_citation_{citation['citation_rank']}_in_query_{i+1}",
+                                "model": "gpt-3.5-turbo",
+                                "input": prompt_text,
+                                "output": sentiment,
+                                "input_length": len(prompt_text),
+                                "output_length": len(sentiment),
                                 "prompt_tokens": prompt_tokens,
                                 "completion_tokens": completion_tokens,
-                                "cost": cost,
-                                "model": "gpt-3.5-turbo"
+                                "cost_input_tokens": cost_input,
+                                "cost_output_tokens": cost_output,
+                                "total_cost": total_cost,
                             })
                         
                         serp_rank = None
@@ -1290,6 +1397,17 @@ def main():
                         "text/csv",
                         use_container_width=True
                     )
+
+                    # Cost analysis export
+                    if st.session_state.cost_analysis:
+                        cost_csv_data = create_cost_analysis_csv(st.session_state.cost_analysis)
+                        st.download_button(
+                            "💰 Download Cost Analysis (CSV)",
+                            cost_csv_data,
+                            f"cost_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                            "text/csv",
+                            use_container_width=True
+                        )
                     
                     # JSON export
                     json_data = df.to_json(orient='records', indent=2, date_format='iso')
