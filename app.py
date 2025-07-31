@@ -13,6 +13,12 @@ from datetime import datetime, timedelta
 import traceback
 import random
 
+# Model pricing per 1 million tokens
+MODEL_PRICING = {
+    "gpt-4": {"prompt": 10.00, "completion": 30.00},
+    "gpt-3.5-turbo": {"prompt": 0.50, "completion": 1.50}
+}
+
 # DataForSEO imports
 try:
     from dataforseo_client import configuration as dfs_config, api_client as dfs_api_provider
@@ -492,11 +498,11 @@ Output only the queries, one per line, without numbering or bullet points."""
                   for q in response.choices[0].message.content.strip().split('\n') 
                   if q.strip() and len(q.strip()) > 5]
         
-        return queries[:n]
+        return queries[:n], response.usage
     
     except Exception as e:
         st.error(f"Error generating queries: {str(e)}")
-        return []
+        return [], None
 
 def simulate_ai_response(client, query, platform="ChatGPT"):
     """Simulate AI response for a query using OpenAI's new API"""
@@ -524,11 +530,11 @@ Be natural and conversational while including real website references."""
             temperature=0.7
         )
         
-        return response.choices[0].message.content.strip()
+        return response.choices[0].message.content.strip(), response.usage
     
     except Exception as e:
         st.error(f"Error simulating AI response: {str(e)}")
-        return ""
+        return "", None
 
 def extract_citations_advanced(response_text):
     """Advanced citation extraction from AI response text"""
@@ -634,17 +640,19 @@ Respond with only one word: positive, neutral, or negative"""
             temperature=0
         )
         
-        sentiment = response.choices[0].message.content.strip().lower()
+        sentiment_text = response.choices[0].message.content.strip().lower()
         
-        if 'positive' in sentiment:
-            return 'Positive'
-        elif 'negative' in sentiment:
-            return 'Negative'
+        if 'positive' in sentiment_text:
+            sentiment = 'Positive'
+        elif 'negative' in sentiment_text:
+            sentiment = 'Negative'
         else:
-            return 'Neutral'
+            sentiment = 'Neutral'
+
+        return sentiment, response.usage
     
     except Exception as e:
-        return 'Neutral'
+        return 'Neutral', None
 
 def get_search_volume(keyword, config):
     """Get search volume from DataForSEO"""
@@ -841,6 +849,62 @@ def display_citations_table(df):
         else:
             st.metric("Avg Citations per Query", "N/A")
 
+def create_cost_analysis_section(cost_analysis):
+    """Display the cost analysis of the OpenAI API calls."""
+    if not cost_analysis or not cost_analysis.get("details"):
+        st.info("No cost analysis data available.")
+        return
+
+    st.subheader("💰 Cost & Token Analysis")
+
+    total_tokens = cost_analysis["total_prompt_tokens"] + cost_analysis["total_completion_tokens"]
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Total Cost (USD)", f"${cost_analysis['total_cost']:.4f}")
+    col2.metric("Total Tokens", f"{total_tokens:,}")
+
+    if total_tokens > 0:
+        avg_cost_per_token = cost_analysis['total_cost'] / total_tokens
+        col3.metric("Avg Cost / Token", f"${avg_cost_per_token:.8f}")
+
+    st.markdown("---")
+    st.subheader("Breakdown by API Call")
+
+    details_df = pd.DataFrame(cost_analysis["details"])
+
+    def get_step_type(step_name):
+        if "generate_query" in step_name:
+            return "Query Generation"
+        if "simulate_ai_response" in step_name:
+            return "AI Response Simulation"
+        if "classify_sentiment" in step_name:
+            return "Sentiment Analysis"
+        return "Other"
+
+    details_df['Function'] = details_df['step'].apply(get_step_type)
+
+    summary_df = details_df.groupby('Function').agg(
+        prompt_tokens=('prompt_tokens', 'sum'),
+        completion_tokens=('completion_tokens', 'sum'),
+        cost=('cost', 'sum'),
+        calls=('step', 'count')
+    ).reset_index()
+
+    summary_df['total_tokens'] = summary_df['prompt_tokens'] + summary_df['completion_tokens']
+
+    st.dataframe(summary_df[['Function', 'calls', 'prompt_tokens', 'completion_tokens', 'total_tokens', 'cost']], use_container_width=True)
+
+    col1, col2 = st.columns(2)
+
+    fig_cost = px.pie(summary_df, values='cost', names='Function', title='Cost Distribution by Function')
+    col1.plotly_chart(fig_cost, use_container_width=True)
+
+    fig_tokens = px.pie(summary_df, values='total_tokens', names='Function', title='Token Usage by Function')
+    col2.plotly_chart(fig_tokens, use_container_width=True)
+
+    with st.expander("View Detailed Cost Log"):
+        st.dataframe(details_df, use_container_width=True)
+
 # Main Application
 def main():
     # Header - Using Streamlit components instead of HTML
@@ -863,6 +927,8 @@ def main():
         st.session_state.results_df = pd.DataFrame()
     if 'current_metrics' not in st.session_state:
         st.session_state.current_metrics = {}
+    if 'cost_analysis' not in st.session_state:
+        st.session_state.cost_analysis = {}
     
     # Enhanced Sidebar Configuration
     with st.sidebar:
@@ -908,6 +974,7 @@ def main():
                 st.session_state.analysis_complete = False
                 st.session_state.results_df = pd.DataFrame()
                 st.session_state.current_metrics = {}
+                st.session_state.cost_analysis = {}
                 st.rerun()
         
         # Quick Stats in Sidebar
@@ -931,14 +998,38 @@ def main():
         try:
             results = []
             all_citations_data = []
+
+            cost_analysis = {
+                "total_prompt_tokens": 0,
+                "total_completion_tokens": 0,
+                "total_cost": 0.0,
+                "details": []
+            }
             
             # Step 1: Generate Queries
             status_text.text("🔄 Generating diverse queries...")
             progress_bar.progress(5)
             
-            queries = generate_query_variations(
+            queries, usage = generate_query_variations(
                 openai_client, seed_keyword, query_template, funnel_stage, num_queries
             )
+
+            if usage:
+                prompt_tokens = usage.prompt_tokens
+                completion_tokens = usage.completion_tokens
+                cost = (prompt_tokens * MODEL_PRICING["gpt-4"]["prompt"] / 1_000_000) + \
+                       (completion_tokens * MODEL_PRICING["gpt-4"]["completion"] / 1_000_000)
+
+                cost_analysis["total_prompt_tokens"] += prompt_tokens
+                cost_analysis["total_completion_tokens"] += completion_tokens
+                cost_analysis["total_cost"] += cost
+                cost_analysis["details"].append({
+                    "step": "generate_query_variations",
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "cost": cost,
+                    "model": "gpt-4"
+                })
             
             if not queries:
                 st.error("❌ Failed to generate queries. Please check your settings and try again.")
@@ -953,7 +1044,24 @@ def main():
                 status_text.text(f"🤖 Processing query {i+1}/{len(queries)}: {query[:50]}...")
                 
                 # Get AI response
-                ai_response = simulate_ai_response(openai_client, query, ai_platform)
+                ai_response, usage = simulate_ai_response(openai_client, query, ai_platform)
+
+                if usage:
+                    prompt_tokens = usage.prompt_tokens
+                    completion_tokens = usage.completion_tokens
+                    cost = (prompt_tokens * MODEL_PRICING["gpt-4"]["prompt"] / 1_000_000) + \
+                           (completion_tokens * MODEL_PRICING["gpt-4"]["completion"] / 1_000_000)
+
+                    cost_analysis["total_prompt_tokens"] += prompt_tokens
+                    cost_analysis["total_completion_tokens"] += completion_tokens
+                    cost_analysis["total_cost"] += cost
+                    cost_analysis["details"].append({
+                        "step": f"simulate_ai_response_for_query_{i+1}",
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                        "cost": cost,
+                        "model": "gpt-4"
+                    })
                 if not ai_response:
                     continue
                 
@@ -986,7 +1094,24 @@ def main():
                     is_competitor = any(comp in domain.lower() for comp in competitors)
                     
                     if is_brand or is_competitor:
-                        sentiment = classify_sentiment(openai_client, citation['context'], citation['citation_text'])
+                        sentiment, usage = classify_sentiment(openai_client, citation['context'], citation['citation_text'])
+
+                        if usage:
+                            prompt_tokens = usage.prompt_tokens
+                            completion_tokens = usage.completion_tokens
+                            cost = (prompt_tokens * MODEL_PRICING["gpt-3.5-turbo"]["prompt"] / 1_000_000) + \
+                                   (completion_tokens * MODEL_PRICING["gpt-3.5-turbo"]["completion"] / 1_000_000)
+
+                            cost_analysis["total_prompt_tokens"] += prompt_tokens
+                            cost_analysis["total_completion_tokens"] += completion_tokens
+                            cost_analysis["total_cost"] += cost
+                            cost_analysis["details"].append({
+                                "step": f"classify_sentiment_for_citation_{citation['citation_rank']}_in_query_{i+1}",
+                                "prompt_tokens": prompt_tokens,
+                                "completion_tokens": completion_tokens,
+                                "cost": cost,
+                                "model": "gpt-3.5-turbo"
+                            })
                         
                         serp_rank = None
                         if include_seo and dataforseo_config:
@@ -1030,6 +1155,7 @@ def main():
             st.session_state.results_df = df
             st.session_state.all_citations_df = all_citations_df
             st.session_state.current_metrics = metrics
+            st.session_state.cost_analysis = cost_analysis
             st.session_state.analysis_complete = True
             
             progress_bar.progress(100)
@@ -1063,8 +1189,8 @@ def main():
         # Main Dashboard Tabs
         st.subheader("📈 Analytics Dashboard")
         
-        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-            "🎯 Overview", "📈 Trends", "🏆 Competition", "💭 Sentiment", "🔍 Citations", "📋 Data Export"
+        tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+            "🎯 Overview", "📈 Trends", "🏆 Competition", "💭 Sentiment", "🔍 Citations", "📋 Data Export", "💰 Cost Analysis"
         ])
         
         with tab1:
@@ -1223,6 +1349,9 @@ def main():
                         "text/plain",
                         use_container_width=True
                     )
+
+        with tab7:
+            create_cost_analysis_section(st.session_state.cost_analysis)
     
     else:
         # Enhanced Welcome Screen using Streamlit components
